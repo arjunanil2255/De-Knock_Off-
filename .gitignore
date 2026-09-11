@@ -1,0 +1,35 @@
+# Datasets (never commit raw data)
+data/raw/
+data/processed/*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Model checkpoints
+checkpoints/
+results/
+
+# ML frameworks
+wandb/
+lightning_logs/
+
+# Frontend
+node_modules/
+.next/
+out/
+
+# Environment / secrets
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

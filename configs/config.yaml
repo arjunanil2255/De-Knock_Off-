@@ -1,0 +1,62 @@
+paths:
+  raw_data_dir: data/raw
+  processed_data_dir: data/processed
+  checkpoint_dir: checkpoints
+  results_dir: results
+  manifest_file: data/processed/manifest.csv
+  train_data_dir: data/raw/fakeavceleb
+  generalization_data_dir: data/raw/av_deepfake1m
+  model_checkpoint: checkpoints/syncverity_combined_best.pt
+
+video:
+  frame_rate: 5
+  embedding_dim: 512
+  max_frames: 200
+  max_crops: 100
+  crop_size: 112
+  face_detector: buffalo_l
+  face_detector_threshold: 0.5
+
+audio:
+  model_name: facebook/wav2vec2-base-960h
+  embedding_dim: 768
+  sample_rate: 16000
+  max_samples: 192000
+
+alignment:
+  time_grid_rate: 10
+  pooling: mean
+  max_grid_steps: 128
+
+fusion:
+  d_model: 256
+  n_heads: 4
+  num_layers: 1
+  dropout: 0.1
+
+classifier:
+  hidden_sizes: [512, 128]
+  dropout: 0.3
+
+training:
+  batch_size: 16
+  epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  seed: 42
+  checkpoint_every: 5
+  num_workers: 4
+  device: auto
+
+explainability:
+  heatmap_colormap: magma
+  spectrogram_colormap: inferno
+  top_attention_spans: 5
+
+evaluation:
+  metrics: [accuracy, balanced_accuracy, auroc, f1]
+  similarity_threshold: 0.75
+
+reference_verification:
+  pgvector_url: postgresql://localhost:5432/syncverity
+  top_k: 5
