@@ -67,31 +67,50 @@ class AudioArtifactClassifier(nn.Module):
             nn.Linear(64, num_classes),
         )
 
-    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Score a batch of waveforms.
-
-        Args:
-            waveform: ``(B, L)`` mono float waveforms in ``[-1, 1]``.
-
-        Returns:
-            ``(B, num_classes)`` logits.
-        """
-        if waveform.ndim == 2:
-            waveform = waveform.unsqueeze(1)
-        spec = self.to_db(self.mel(waveform))
+    def _forward_one(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Classify one unpadded waveform while preserving its true length."""
+        if waveform.numel() < self.mel.n_fft:
+            waveform = F.pad(waveform, (0, self.mel.n_fft - waveform.numel()))
+        spec = self.to_db(self.mel(waveform.unsqueeze(0).unsqueeze(0)))
         spec = (spec - spec.mean()) / (spec.std() + 1e-6)
         features = self.conv_stack(spec)
         pooled = self.global_pool(features).flatten(1)
         return self.classifier(pooled)
 
-    def artifact_score(self, waveform: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, waveform: torch.Tensor, waveform_pad_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Score a batch of waveforms.
+
+        Args:
+            waveform: ``(B, L)`` mono float waveforms in ``[-1, 1]``.
+            waveform_pad_mask: Optional ``(B, L)`` mask with ``True`` for
+                padding. Each clip is trimmed before its spectrogram is made.
+
+        Returns:
+            ``(B, num_classes)`` logits.
+        """
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        logits: list[torch.Tensor] = []
+        for index in range(waveform.shape[0]):
+            clip = waveform[index]
+            if waveform_pad_mask is not None:
+                clip = clip[~waveform_pad_mask[index]]
+            logits.append(self._forward_one(clip))
+        return torch.cat(logits, dim=0)
+
+    def artifact_score(
+        self, waveform: torch.Tensor, waveform_pad_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Return the fake-class probability as the artifact score.
 
         Args:
             waveform: ``(B, L)`` mono float waveforms.
+            waveform_pad_mask: Optional ``(B, L)`` padding mask.
 
         Returns:
             ``(B,)`` artifact probabilities.
         """
-        logits = self.forward(waveform)
+        logits = self.forward(waveform, waveform_pad_mask=waveform_pad_mask)
         return F.softmax(logits, dim=-1)[:, 1]

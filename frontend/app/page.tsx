@@ -19,8 +19,14 @@ export default function Home() {
         body: form,
       });
       if (!response.ok) {
-        const detail = await response.json();
-        throw new Error(detail.detail ?? `Backend error (${response.status})`);
+        const payload = (await response.json()) as {
+          detail?: string | { message?: string };
+        };
+        const message =
+          typeof payload.detail === "string"
+            ? payload.detail
+            : payload.detail?.message;
+        throw new Error(message ?? `Backend error (${response.status})`);
       }
       setResult((await response.json()) as AnalysisResult);
     } catch (err) {

@@ -47,6 +47,7 @@ training:
   checkpoint_every: 5
   num_workers: 4
   device: auto
+  artifact_auxiliary_loss_weight: 0.5
 
 explainability:
   heatmap_colormap: magma
@@ -60,3 +61,7 @@ evaluation:
 reference_verification:
   pgvector_url: postgresql://localhost:5432/syncverity
   top_k: 5
+
+api:
+  max_upload_mb: 200
+  upload_chunk_bytes: 1048576

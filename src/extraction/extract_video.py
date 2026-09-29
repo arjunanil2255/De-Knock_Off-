@@ -23,6 +23,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("extract_video")
+_DETECTORS: dict[tuple[int, str], Any] = {}
 
 # Canonical 112x112 ArcFace landmark targets for similarity alignment.
 _ARCFACE_REF = np.array(
@@ -70,7 +71,7 @@ def _align_face_crop_bbox(
     return cv2.resize(crop, (crop_size, crop_size), interpolation=cv2.INTER_LINEAR)
 
 
-def _get_detector(ctx_id: int) -> Any:
+def _get_detector(ctx_id: int, model_name: str = "buffalo_l") -> Any:
     """Build a lazy-loaded InsightFace FaceAnalysis detector.
 
     Imported inside the function so the heavy ``insightface`` dependency is
@@ -84,11 +85,15 @@ def _get_detector(ctx_id: int) -> Any:
     """
     from insightface.app import FaceAnalysis
 
+    cache_key = (ctx_id, model_name)
+    if cache_key in _DETECTORS:
+        return _DETECTORS[cache_key]
     app = FaceAnalysis(
-        name="buffalo_l",
+        name=model_name,
         providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
     )
     app.prepare(ctx_id=ctx_id, det_size=(640, 640))
+    _DETECTORS[cache_key] = app
     return app
 
 
@@ -105,6 +110,12 @@ def sample_frames(video_path: Path, frame_rate: int) -> list[np.ndarray]:
     Raises:
         RuntimeError: If the video cannot be opened.
     """
+    frames, _ = _sample_frames_with_rate(video_path, frame_rate)
+    return frames
+
+
+def _sample_frames_with_rate(video_path: Path, frame_rate: int) -> tuple[list[np.ndarray], float]:
+    """Sample frames and return the effective sampling rate used."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         cap.release()
@@ -123,7 +134,7 @@ def sample_frames(video_path: Path, frame_rate: int) -> list[np.ndarray]:
             frames.append(frame)
         idx += 1
     cap.release()
-    return frames
+    return frames, source_fps / interval
 
 
 def extract_embeddings(
@@ -206,15 +217,18 @@ def process_video(
         return out_file
 
     config = load_config()
-    detector = _get_detector(ctx_id)
+    detector = _get_detector(ctx_id, str(config["video"]["face_detector"]))
     crop_size = int(config["video"]["crop_size"])
-    frames = sample_frames(video_path, int(config["video"]["frame_rate"]))
+    frames, effective_frame_rate = _sample_frames_with_rate(
+        video_path, int(config["video"]["frame_rate"])
+    )
     if not frames:
         logger.warning("No frames decoded for %s; writing empty cache.", video_path)
         torch.save(
             {
                 "embeddings": torch.zeros(0, int(config["video"]["embedding_dim"])),
                 "crops": torch.zeros(0, crop_size, crop_size, 3, dtype=torch.uint8),
+                "sampling_fps": effective_frame_rate,
                 "clip_id": clip_id,
             },
             out_file,
@@ -231,6 +245,7 @@ def process_video(
         "embeddings": torch.from_numpy(embeddings),
         "frame_indices": torch.tensor(kept, dtype=torch.long),
         "crops": torch.from_numpy(crops),
+        "sampling_fps": effective_frame_rate,
         "clip_id": clip_id,
     }
     torch.save(payload, out_file)

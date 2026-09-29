@@ -33,15 +33,15 @@ export default function ResultView({ result }: { result: AnalysisResult }) {
   const paths = result.explanation_paths ?? {};
 
   const explanationPanels = [
-    { key: "attention_video_to_audio", title: "Video → Audio attention", caption: "Which video instants each audio instant aligns to." },
-    { key: "attention_audio_to_video", title: "Audio → Video attention", caption: "Which audio instants each video instant aligns to. Strongly off-diagonal weights indicate temporal mismatch." },
+    { key: "attention_video_to_audio", title: "Video → Audio attention", caption: "For each video instant, the audio instants the fusion model weighted most strongly." },
+    { key: "attention_audio_to_video", title: "Audio → Video attention", caption: "For each audio instant, the video instants the fusion model weighted most strongly. Attention is supporting evidence, not a calibrated mismatch score." },
     { key: "audio_spectrogram_highlight", title: "Audio spectrogram", caption: "Log-mel spectrogram with model-focused spectral regions highlighted." },
     ...Object.entries(paths)
       .filter(([key]) => key.startsWith("gradcam_frame_"))
       .map(([key], idx) => ({
         key,
         title: `Face frame ${idx}`,
-        caption: "Grad-CAM heatmap of the video artifact branch over the aligned face crop.",
+        caption: "Grad-CAM heatmap of the artifact branch for the final predicted class over the aligned face crop.",
       })),
   ].filter((p) => paths[p.key]);
 
@@ -56,8 +56,8 @@ export default function ResultView({ result }: { result: AnalysisResult }) {
         </div>
         <div className="scores">
           <div className="score">
-            <span className="label">consistency</span>
-            <span className="value">{result.scores.consistency.toFixed(3)}</span>
+            <span className="label">fusion embedding norm (diagnostic)</span>
+            <span className="value">{result.scores.fusion_embedding_norm.toFixed(3)}</span>
           </div>
           <div className="score">
             <span className="label">video artifact</span>

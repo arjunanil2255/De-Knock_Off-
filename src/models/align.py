@@ -15,17 +15,20 @@ def sequence_to_grid(
     embeddings: torch.Tensor,
     times: torch.Tensor,
     grid_steps: int,
+    duration: float | None = None,
 ) -> torch.Tensor:
     """Average-pool a sequence of embeddings onto a fixed time grid.
 
-    Each embedding is assigned to grid bin ``floor(t * G / t_max)`` where
-    ``t_max`` is the last time in ``times``; bins with no assignments become
-    zero vectors.
+    Each embedding is assigned to a bin over the supplied clip ``duration``.
+    When ``duration`` is omitted, the final timestamp is used for backwards
+    compatibility.  Cross-modal callers must pass their *shared* duration;
+    scaling video and audio independently would erase a real timing offset.
 
     Args:
         embeddings: ``(S, D)`` sequence of embeddings.
         times: ``(S,)`` per-embedding times in seconds (monotonic).
         grid_steps: Number of output grid steps ``G``.
+        duration: Physical duration covered by the grid in seconds.
 
     Returns:
         ``(G, D)`` pooled sequence; empty bins are zero vectors.
@@ -42,19 +45,36 @@ def sequence_to_grid(
     if grid_steps < 1:
         raise ValueError(f"grid_steps must be >= 1, got {grid_steps}")
     if seq_len == 0:
-        return torch.zeros(grid_steps, dim, dtype=embeddings.dtype)
+        return torch.zeros(grid_steps, dim, dtype=embeddings.dtype, device=embeddings.device)
 
-    t_max = float(times[-1].item()) if times[-1].item() > 0.0 else 1.0
+    t_max = float(duration) if duration is not None else float(times[-1].item())
+    t_max = t_max if t_max > 0.0 else 1.0
     bins = torch.floor(times * (grid_steps - 1) / t_max).long().clamp(min=0, max=grid_steps - 1)
 
-    sums = torch.zeros(grid_steps, dim, dtype=embeddings.dtype)
-    counts = torch.zeros(grid_steps, dtype=torch.long)
+    sums = torch.zeros(grid_steps, dim, dtype=embeddings.dtype, device=embeddings.device)
+    counts = torch.zeros(grid_steps, dtype=torch.long, device=embeddings.device)
     sums.index_add_(0, bins, embeddings)
     counts.scatter_add_(0, bins, torch.ones_like(bins))
 
     non_empty = counts > 0
     sums[non_empty] /= counts[non_empty].unsqueeze(1).to(dtype=embeddings.dtype)
     return sums
+
+
+def grid_validity(times: torch.Tensor, grid_steps: int, duration: float) -> torch.Tensor:
+    """Return ``True`` for shared-grid bins containing an observed sample.
+
+    Empty alignment bins must remain masked: a zero vector can mean either
+    padding or a valid embedding whose value happens to be near zero.
+    """
+    valid = torch.zeros(grid_steps, dtype=torch.bool, device=times.device)
+    if times.numel() == 0:
+        return valid
+    safe_duration = duration if duration > 0.0 else 1.0
+    bins = torch.floor(times * (grid_steps - 1) / safe_duration).long()
+    bins = bins.clamp(min=0, max=grid_steps - 1)
+    valid[bins] = True
+    return valid
 
 
 def build_audio_times(seq_len: int, fps: float = 50.0) -> torch.Tensor:
@@ -120,8 +140,10 @@ def align_pair(
             torch.zeros(1, dtype=video_times.dtype),
         )
 
-    grid_steps = max(1, int(round(t_max * grid_rate)))
-    video_grid = sequence_to_grid(video_emb, video_times, grid_steps)
-    audio_grid = sequence_to_grid(audio_emb, audio_times, grid_steps)
+    # Include both endpoints so a 3-second clip at 10 Hz has timestamps
+    # 0.0, 0.1, ..., 3.0 rather than a slightly compressed grid.
+    grid_steps = max(1, int(torch.ceil(torch.tensor(t_max * grid_rate)).item()) + 1)
+    video_grid = sequence_to_grid(video_emb, video_times, grid_steps, duration=t_max)
+    audio_grid = sequence_to_grid(audio_emb, audio_times, grid_steps, duration=t_max)
     grid_times = torch.linspace(0.0, t_max, grid_steps)
     return video_grid, audio_grid, grid_times

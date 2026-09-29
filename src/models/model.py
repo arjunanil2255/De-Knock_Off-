@@ -42,6 +42,9 @@ class SyncVerityModel(nn.Module):
         self.enable_fusion = enable_fusion
         self.enable_video_artifact = enable_video_artifact
         self.enable_audio_artifact = enable_audio_artifact
+        self.artifact_auxiliary_loss_weight = float(
+            config.get("training", {}).get("artifact_auxiliary_loss_weight", 0.5)
+        )
 
         fusion_cfg = config["fusion"]
         self.consistency_dim = int(fusion_cfg["d_model"])
@@ -100,13 +103,21 @@ class SyncVerityModel(nn.Module):
 
         if self.enable_video_artifact:
             crops = batch["crops"].float().permute(0, 1, 4, 2, 3)  # (B, T, 3, H, W)
-            video_score = self.video_artifact.artifact_score(crops)
+            video_artifact_logits = self.video_artifact(
+                crops, crop_pad_mask=batch.get("crop_mask")
+            )
+            video_score = torch.softmax(video_artifact_logits, dim=-1)[:, 1]
         else:
+            video_artifact_logits = None
             video_score = torch.zeros(batch_size, device=device)
 
         if self.enable_audio_artifact:
-            audio_score = self.audio_artifact.artifact_score(batch["waveform"])
+            audio_artifact_logits = self.audio_artifact(
+                batch["waveform"], waveform_pad_mask=batch.get("waveform_mask")
+            )
+            audio_score = torch.softmax(audio_artifact_logits, dim=-1)[:, 1]
         else:
+            audio_artifact_logits = None
             audio_score = torch.zeros(batch_size, device=device)
 
         logits = self.classifier(consistency, video_score, audio_score)
@@ -117,6 +128,10 @@ class SyncVerityModel(nn.Module):
             "video_score": video_score,
             "audio_score": audio_score,
         }
+        if video_artifact_logits is not None:
+            output["video_artifact_logits"] = video_artifact_logits
+        if audio_artifact_logits is not None:
+            output["audio_artifact_logits"] = audio_artifact_logits
         if self.enable_fusion:
             output.update(
                 {

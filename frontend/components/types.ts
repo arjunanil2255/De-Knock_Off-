@@ -3,7 +3,7 @@ export type AnalysisResult = {
   verdict: "real" | "fake";
   confidence: number;
   scores: {
-    consistency: number;
+    fusion_embedding_norm: number;
     video_artifact: number;
     audio_artifact: number;
   };

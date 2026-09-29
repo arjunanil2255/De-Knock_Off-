@@ -21,6 +21,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("extract_audio")
+_AUDIO_MODELS: dict[tuple[str, str], tuple[torch.nn.Module, object]] = {}
 
 
 def _find_ffmpeg() -> str:
@@ -106,6 +107,20 @@ def extract_audio_track(
     return outputs.last_hidden_state
 
 
+def _get_audio_model(model_name: str, device: str) -> tuple[torch.nn.Module, object]:
+    """Load wav2vec2 once per model/device for batch extraction or inference."""
+    cache_key = (model_name, device)
+    cached = _AUDIO_MODELS.get(cache_key)
+    if cached is not None:
+        return cached
+    from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Model
+
+    processor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+    model = Wav2Vec2Model.from_pretrained(model_name).eval().to(device)
+    _AUDIO_MODELS[cache_key] = (model, processor)
+    return model, processor
+
+
 def process_audio(
     video_path: Path,
     clip_id: str,
@@ -150,11 +165,8 @@ def process_audio(
         )
         return out_file
 
-    from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Model
-
     model_name = config["audio"]["model_name"]
-    processor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-    model = Wav2Vec2Model.from_pretrained(model_name).eval().to(device)
+    model, processor = _get_audio_model(model_name, device)
 
     embeddings = extract_audio_track(model, processor, waveform, sample_rate).to("cpu")
     payload = {

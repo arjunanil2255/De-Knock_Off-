@@ -37,11 +37,15 @@ class VideoArtifactClassifier(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.head = nn.Linear(self.backbone.num_features, num_classes)
 
-    def forward(self, crops: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, crops: torch.Tensor, crop_pad_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Score a batch of aligned face-crop sequences.
 
         Args:
             crops: ``(B, T, 3, H, W)`` float tensors in ``[0, 1]``.
+            crop_pad_mask: Optional ``(B, T)`` mask with ``True`` for
+                padded crops, which are excluded from temporal pooling.
 
         Returns:
             ``(B, num_classes)`` logits (mean-pooled over frames).
@@ -49,18 +53,23 @@ class VideoArtifactClassifier(nn.Module):
         batch_size, seq_len, channels, height, width = crops.shape
         flat = crops.reshape(batch_size * seq_len, channels, height, width)
         features = self.backbone(flat)
-        logits = self.head(self.drop(features))
-        logits = logits.reshape(batch_size, seq_len, -1).mean(dim=1)
-        return logits
+        frame_logits = self.head(self.drop(features)).reshape(batch_size, seq_len, -1)
+        if crop_pad_mask is None:
+            return frame_logits.mean(dim=1)
+        valid = (~crop_pad_mask).unsqueeze(-1).to(frame_logits.dtype)
+        return (frame_logits * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
 
-    def artifact_score(self, crops: torch.Tensor) -> torch.Tensor:
+    def artifact_score(
+        self, crops: torch.Tensor, crop_pad_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Return the fake-class probability as the artifact score.
 
         Args:
             crops: ``(B, T, 3, H, W)`` aligned face crops.
+            crop_pad_mask: Optional ``(B, T)`` padding mask.
 
         Returns:
             ``(B,)`` artifact probabilities.
         """
-        logits = self.forward(crops)
+        logits = self.forward(crops, crop_pad_mask=crop_pad_mask)
         return F.softmax(logits, dim=-1)[:, 1]

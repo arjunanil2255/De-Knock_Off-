@@ -2,12 +2,14 @@
 
 Scans a dataset root for video files, infers their split and label from the
 directory layout, and writes ``data/processed/manifest.csv`` with columns
-``{clip_id, video_path, label, split}``. Generalization-test data is never
-touched here (see ``rules.md``).
+``{clip_id, video_path, label, source_group, split}``. A generalization corpus
+must be built into a separate manifest with ``--split generalization`` so it is
+never mixed with train/validation data (see ``rules.md``).
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -16,7 +18,29 @@ import pandas as pd
 
 from src.config import load_config
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
+
+
+def make_clip_id(relative_path: str, namespace: str = "") -> str:
+    """Create a cache-safe ID unique across folders and dataset roots."""
+    path = Path(relative_path)
+    readable = re.sub(r"[^A-Za-z0-9]+", "-", path.stem).strip("-") or "clip"
+    digest = hashlib.sha1(f"{namespace}/{relative_path}".encode("utf-8")).hexdigest()[:12]
+    return f"{readable}-{digest}"
+
+
+def infer_source_group(relative_path: str, source_group_pattern: str) -> str:
+    """Extract an auditable source group used to prevent split leakage.
+
+    FakeAVCeleb-style names usually begin with an identity/source token before
+    ``_`` or ``-``. Projects with a different layout should supply a regex
+    containing one capture group through ``--source-group-pattern``.
+    """
+    stem = Path(relative_path).stem
+    match = re.search(source_group_pattern, stem)
+    if match and match.groups():
+        return match.group(1)
+    return stem
 
 
 def infer_label(relative: str) -> int:
@@ -48,6 +72,7 @@ def build_manifest(
     split: str = "train",
     val_fraction: float = 0.1,
     seed: int = 42,
+    source_group_pattern: str = r"^([^_-]+)",
 ) -> Path:
     """Scan ``data_dir`` and write a train/val manifest CSV.
 
@@ -57,6 +82,8 @@ def build_manifest(
         split: Default split if ``val_fraction == 0``.
         val_fraction: Fraction of clips to reserve for validation.
         seed: Seed for the deterministic split.
+        source_group_pattern: Regex whose first capture group identifies clips
+            from the same underlying source/identity.
 
     Returns:
         Path of the written manifest.
@@ -76,21 +103,46 @@ def build_manifest(
         except ValueError:
             continue
         records.append({
-            "clip_id": video.stem,
+            "clip_id": make_clip_id(relative, namespace=str(root.resolve())),
             "video_path": str(video),
             "label": label,
+            "source_group": infer_source_group(relative, source_group_pattern),
         })
 
     if not records:
         raise ValueError(f"No video files found under {root}; check config paths.")
 
-    clip_ids = [r["clip_id"] for r in records]
-    rng.shuffle(clip_ids)
-    n_val = int(len(clip_ids) * val_fraction)
-    val_ids = set(clip_ids[:n_val])
+    if split == "generalization":
+        # A held-out generalization corpus must never be partitioned into the
+        # training validation split by accident.
+        val_fraction = 0.0
+    if not 0.0 <= val_fraction < 1.0:
+        raise ValueError("val_fraction must be in [0, 1).")
+
+    groups: dict[tuple[str, tuple[int, ...]], list[dict[str, object]]] = {}
+    for record in records:
+        group = str(record["source_group"])
+        # Labels are included in the bucket after the first pass below, so
+        # mixed-label source groups stay intact and are still auditable.
+        groups.setdefault((group, ()), []).append(record)
+
+    buckets: dict[tuple[int, ...], list[str]] = {}
+    for (group, _), group_rows in groups.items():
+        label_signature = tuple(sorted({int(row["label"]) for row in group_rows}))
+        buckets.setdefault(label_signature, []).append(group)
+
+    val_groups: set[str] = set()
+    for group_names in buckets.values():
+        rng.shuffle(group_names)
+        # Do not place a group in validation when it is the only source group
+        # available for that label signature.
+        count = int(round(len(group_names) * val_fraction))
+        if val_fraction > 0.0 and len(group_names) > 1:
+            count = max(1, count)
+        val_groups.update(group_names[:count])
 
     for record in records:
-        record["split"] = "val" if record["clip_id"] in val_ids else split
+        record["split"] = "val" if record["source_group"] in val_groups else split
 
     out_path = Path(output_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,11 +170,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", help="Output CSV (defaults to config manifest_file).")
     parser.add_argument("--split", default="train", help="Split column value for non-val clips.")
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation fraction.")
+    parser.add_argument(
+        "--source-group-pattern",
+        default=r"^([^_-]+)",
+        help="Regex with capture group 1 identifying clips from one source/identity.",
+    )
     args = parser.parse_args(argv)
 
     config = load_config()
     output = args.output or config["paths"]["manifest_file"]
-    build_manifest(args.data_dir, output, args.split, args.val_fraction)
+    build_manifest(
+        args.data_dir,
+        output,
+        args.split,
+        args.val_fraction,
+        source_group_pattern=args.source_group_pattern,
+    )
     return 0
 
 

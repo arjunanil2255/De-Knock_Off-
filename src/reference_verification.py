@@ -152,19 +152,20 @@ class ReferenceStore:
             )
         return results
 
-    def impersonation_likelihood(
+    def identity_match_signal(
         self, suspect_embedding: np.ndarray, threshold: float | None = None
     ) -> dict[str, Any]:
-        """Judge impersonation risk for a suspect identity vector.
+        """Return an identity-similarity signal, not an impersonation verdict.
 
         Args:
             suspect_embedding: ``(512,)`` unit-normalised identity vector.
             threshold: Similarity threshold above which a match counts as
                 potential impersonation (defaults to config).
 
-        Returns:
-            Dict with ``matches``, ``threshold``, ``max_similarity`` and
-            ``impersonation_risk`` (``low``/``medium``/``high``).
+        An authentic new clip of the reference person and an impersonation of
+        that person can both produce a strong ArcFace match. Human/contextual
+        verification is therefore required before making any impersonation
+        claim.
         """
         config = load_config()
         threshold = float(
@@ -172,13 +173,20 @@ class ReferenceStore:
         )
         matches = self.search(suspect_embedding)
         max_similarity = matches[0]["similarity"] if matches else 0.0
-        if matches and max_similarity >= threshold:
-            risk = "high" if max_similarity >= threshold + 0.15 else "medium"
-        else:
-            risk = "low"
         return {
             "matches": matches,
             "threshold": threshold,
             "max_similarity": max_similarity,
-            "impersonation_risk": risk,
+            "reference_identity_match": bool(matches and max_similarity >= threshold),
+            "requires_contextual_verification": True,
         }
+
+    def impersonation_likelihood(
+        self, suspect_embedding: np.ndarray, threshold: float | None = None
+    ) -> dict[str, Any]:
+        """Deprecated compatibility wrapper for :meth:`identity_match_signal`."""
+        logger.warning(
+            "impersonation_likelihood is deprecated: identity similarity alone "
+            "cannot establish impersonation."
+        )
+        return self.identity_match_signal(suspect_embedding, threshold)

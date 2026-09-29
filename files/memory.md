@@ -5,8 +5,10 @@ pick up context quickly without re-reading the entire conversation history.
 Update this file at the end of any substantial work session.
 
 ## Current phase
-Phases 0–8 scaffolded in code; full training pipeline implemented. Actual
-training on FakeAVCeleb not yet run (no dataset downloaded yet).
+Phases 0–8 are implemented in code, with regression coverage for alignment
+and manifest-split invariants. Actual training on FakeAVCeleb has not yet run
+because no dataset is present in `data/raw/`. Dataset setup instructions are
+in `data/README.md`.
 
 ## Host environment (as of this session)
 - OS: Windows; Python 3.14.5.
@@ -92,17 +94,27 @@ All modules import and compile. Smoke tests passed:
 - Literature-check wording for the novelty claim (still to be drafted).
 
 ## Next steps
-1. Download a FakeAVCeleb subset (~20 clips) into `data/raw/fakeavceleb`.
+1. Obtain FakeAVCeleb access through its official request process; do not use
+   an unapproved mirror. Unpack an approved subset (~20 clips for sanity
+   checks) into `data/raw/fakeavceleb`.
 2. `python -m src.data.build_manifest data/raw/fakeavceleb` → writes
    `data/processed/manifest.csv`.
-3. Sanity-run extraction: `python -m src.extraction.extract_video <clip>` and
-   `python -m src.extraction.extract_audio <clip>`.
+3. Cache the full train/val manifest: `python -m src.data.extract_manifest
+   --device cuda` (then verify its successful/failed count). For a separate
+   AV-Deepfake1M corpus, obtain access under its EULA, place it in
+   `data/raw/av_deepfake1m`, build a distinct `generalization` manifest with
+   `python -m src.data.build_avdeepfake_manifest data/raw/av_deepfake1m`, and
+   extract it separately. Never merge its rows into the FakeAVCeleb manifest.
 4. Train: `python -m src.train --mode fusion`, then `--mode artifact`, then
-   `--mode combined`.
+   `--mode combined`. First verify the wiring with `--max-clips 16` and a
+   short run; this option takes a deterministic class-balanced subset per
+   split and must not be used for final metrics.
 5. Train classifier with the tiny-batch overfit check before full training
    (per `rules.md`).
 6. Generalization test only at the end: `python -m src.evaluate
-   checkpoints/syncverity_combined_epochN.pt --split generalization`.
+   checkpoints/syncverity_combined_best.pt --split generalization --manifest
+   data/processed/av_deepfake1m_manifest.csv --compare-split val
+   --compare-manifest data/processed/manifest.csv`.
 7. Web demo: `uvicorn backend.main:app` + `npm run dev` in `frontend/` (requires
    a trained checkpoint).
 
@@ -115,3 +127,39 @@ All modules import and compile. Smoke tests passed:
 - Decisions made:
 - Next steps:
 ```
+
+### [2026-09-26] Reliability and evaluation hardening
+- Fixed: alignment uses a shared physical duration; empty temporal bins and
+  artifact crop/waveform padding are masked instead of being treated as data.
+- Fixed: unique manifest cache IDs, source-group split isolation, a manifest
+  extraction command, validation-best checkpoints, held-out metric-drop
+  reporting, and safe evaluation behavior for one-class splits.
+- Fixed: bounded streaming API uploads, unique analysis result directories,
+  model/extractor reuse, and user-safe API errors.
+- Verified: Python compilation, four unit tests, audio padded-batch forward,
+  and `npm run build` all pass.
+- Still blocked: real dataset download/extraction and real training metrics.
+
+### [2026-09-26] Dataset-access setup
+- Added `data/README.md` with the approved directory layout and commands for
+  FakeAVCeleb train/validation and AV-Deepfake1M held-out evaluation.
+- Confirmed that FakeAVCeleb requires an approved request-form download and
+  AV-Deepfake1M requires accepting its EULA; neither dataset can be
+  automatically downloaded without the project owner's authorization.
+- Updated manifest IDs to include the dataset-root namespace, preventing cache
+  collisions between separate FakeAVCeleb and AV-Deepfake1M manifests.
+- Verified: the four regression tests still pass after the manifest-ID change.
+
+### [2026-09-26] AV-Deepfake1M metadata support
+- Added `src/data/build_avdeepfake_manifest.py`. It converts the official
+  `*_metadata.json` files into an all-held-out `generalization` manifest using
+  `modify_type` (`real` = 0, any documented modification type = 1).
+- Updated `data/README.md` to use this adapter rather than the generic
+  directory-label manifest builder for AV-Deepfake1M.
+- Verified: five regression tests pass, including an AV-Deepfake1M metadata
+  fixture that validates `modify_type` label conversion.
+
+### [2026-09-28] Development subset workflow
+- Added `python -m src.train --max-clips N`, which limits each split to a
+  deterministic, approximately class-balanced subset after unusable caches
+  are filtered. Use it only for smoke tests/tiny-batch overfitting.

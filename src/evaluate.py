@@ -8,6 +8,7 @@ metric are available the generalization drop is printed for comparison.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -67,7 +68,10 @@ def evaluate_split(
         elif name == "balanced_accuracy":
             results[name] = balanced_accuracy_score(labels, predictions)
         elif name == "auroc":
-            results[name] = roc_auc_score(labels, probs)
+            # AUROC is undefined when a small/dev split contains one class.
+            results[name] = (
+                roc_auc_score(labels, probs) if np.unique(labels).size == 2 else float("nan")
+            )
         elif name == "f1":
             results[name] = f1_score(labels, predictions, zero_division=0)
         else:
@@ -80,7 +84,8 @@ def evaluate(
     checkpoint_path: str | Path,
     split: str,
     device: torch.device,
-) -> dict[str, dict[str, float]]:
+    manifest_path: str | Path | None = None,
+) -> dict[str, float]:
     """Evaluate a checkpoint on one split and return per-metric scores.
 
     Args:
@@ -88,6 +93,8 @@ def evaluate(
         checkpoint_path: Path to a training checkpoint.
         split: Manifest split to evaluate.
         device: Torch device.
+        manifest_path: Optional manifest override, required when evaluating a
+            physically separate held-out corpus.
 
     Returns:
         Dictionary mapping metric name to value.
@@ -106,7 +113,7 @@ def evaluate(
 
     dataset = SyncVerityDataset(
         processed_dir=config["paths"]["processed_data_dir"],
-        manifest_path=config["paths"]["manifest_file"],
+        manifest_path=manifest_path or config["paths"]["manifest_file"],
         split=split,
     )
     loader = DataLoader(dataset, batch_size=int(config["training"]["batch_size"]), shuffle=False)
@@ -132,17 +139,48 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--split", default="val", help="Manifest split to evaluate (val / generalization)."
     )
+    parser.add_argument("--manifest", help="Optional manifest CSV for the target split.")
+    parser.add_argument(
+        "--compare-split",
+        help="Reference split used to calculate metric drop (for example: val).",
+    )
+    parser.add_argument(
+        "--compare-manifest",
+        help="Optional manifest CSV containing the reference split.",
+    )
     parser.add_argument("--device", default=None, help="Torch device (defaults to auto).")
     args = parser.parse_args(argv)
 
     config = load_config()
     training_cfg = config["training"]
     device_name = args.device or training_cfg.get("device", "auto")
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu" if device_name == "auto" else device_name
-    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if device_name == "auto" else torch.device(device_name)
 
-    evaluate(config, args.checkpoint, args.split, device)
+    target = evaluate(config, args.checkpoint, args.split, device, args.manifest)
+    report: dict[str, Any] = {"target_split": args.split, "target_metrics": target}
+    if args.compare_split:
+        reference = evaluate(
+            config, args.checkpoint, args.compare_split, device, args.compare_manifest
+        )
+        drop = {
+            metric: reference[metric] - target[metric]
+            for metric in target
+            if metric in reference and not (np.isnan(reference[metric]) or np.isnan(target[metric]))
+        }
+        report.update({
+            "reference_split": args.compare_split,
+            "reference_metrics": reference,
+            "generalization_drop": drop,
+        })
+        print("Generalization drop (reference - target):")
+        for metric, value in drop.items():
+            print(f"  {metric}: {value:.4f}")
+
+    results_dir = Path(config["paths"]["results_dir"])
+    results_dir.mkdir(parents=True, exist_ok=True)
+    report_path = results_dir / f"evaluation_{Path(args.checkpoint).stem}_{args.split}.json"
+    report_path.write_text(json.dumps(report, indent=2, allow_nan=True), encoding="utf-8")
+    print(f"Saved evaluation report: {report_path}")
     return 0
 
 
